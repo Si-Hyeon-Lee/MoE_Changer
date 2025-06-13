@@ -1,5 +1,7 @@
 import copy
+import os
 import sys
+import json
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -75,7 +77,7 @@ class ChangeMoE:
         self.dtype = dtype
         self.device = device
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_id,use_fast=False)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id,
             torch_dtype=dtype,
@@ -105,9 +107,75 @@ class ChangeMoE:
 
     def get_model(self)->AutoModelForCausalLM:
         return self.model
+    
     def get_tokenizer(self)->AutoTokenizer:
         return self.tokenizer
+    
+    def save_moe(self, save_dir: str):
+            """
+            Persist the *already-converted* MoE model.
 
+            • We store …
+                ─ the model’s state_dict  ➜   <save_dir>/pytorch_model.bin
+                ─ a small JSON with MoE meta ➜   <save_dir>/moe_meta.json
+                ─ the tokenizer files       ➜   usual HF format
+            """
+            os.makedirs(save_dir, exist_ok=True)
+
+            torch.save(self.model.state_dict(), os.path.join(save_dir, "pytorch_model.bin"))
+
+            # -- 2) save MoE-specific hyper-parameters so we can rebuild the net
+            moe_meta = {
+                "base_model_id": self.model.config._name_or_path,
+                "num_experts":   self.num_experts,
+                "top_k":         self.top_k,
+                "dtype":         str(self.dtype).replace("torch.", ""), # 안해주면 에러나서 추가함.
+            }
+            with open(os.path.join(save_dir, "moe_meta.json"), "w") as fp:
+                json.dump(moe_meta, fp, indent=2)
+
+            self.tokenizer.save_pretrained(save_dir) # 굳이 필요할까?
+
+    @classmethod
+    def load_moe(cls,
+                 load_dir: str,
+                 device: str | torch.device = "CUDA",
+                 strict: bool = True,
+                 **hf_kwargs,
+                 ) -> "ChangeMoE":
+        # 아예 인스턴스를 새로 만들어서 리턴. 
+
+        meta_path = os.path.join(load_dir, "moe_meta.json")
+        if not os.path.isfile(meta_path):
+            raise FileNotFoundError(f"'{meta_path}' MoEChanger meta 없음.")
+        
+        with open(meta_path) as fp:
+            meta = json.load(fp)
+
+        dtype = getattr(torch, meta["dtype"])
+        base_id = meta["base_model_id"]
+
+        obj = cls(model_id      = base_id,
+                  num_experts   = meta["num_experts"],
+                  top_k         = meta["top_k"],
+                  dtype         = dtype,
+                  device        = device,
+                  **hf_kwargs)
+
+        ckpt_path = os.path.join(load_dir, "pytorch_model.bin")
+        state = torch.load(ckpt_path, map_location="cpu")
+        obj.model.load_state_dict(state, strict=strict)
+
+        obj.tokenizer = AutoTokenizer.from_pretrained(load_dir, use_fast=False) # 필요한가?
+        obj.tokenizer.pad_token = obj.tokenizer.eos_token
+        obj.tokenizer.padding_side = "left"
+
+        # send to device if not already
+        if device is not None:
+            obj.model.to(device)
+
+        return obj
+    
 if __name__ == '__main__':
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     model_id = "meta-llama/Llama-3.2-1B"
@@ -146,3 +214,9 @@ if __name__ == '__main__':
     decoded = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
     for i, output in enumerate(decoded):
         print(f"{i} output : {output}")
+
+    # Save & Load method test.
+    changer.save_moe("./save_moe")
+    new_changer = ChangeMoE.load_moe("./save_moe","CUDA")
+    updated_lm = new_changer.get_model()
+    updated_tokenizer = new_changer.get_tokenizer() # 이거 사실 변경 없음.
