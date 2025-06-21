@@ -32,14 +32,14 @@ class MoEFFN(nn.Module):
         self.experts = nn.ModuleList([copy.deepcopy(template_mlp) # 가중치까지 복사.
                                       for _ in range(num_experts)])
 
-    def forward(self, x):                      # x: [B, T, H]
-        indices, gates = self.router(x)        # [B,T,K], [B,T,K]
+    def forward(self, x):
+        indices, gates = self.router(x)
         B, T, H = x.shape
         out = torch.zeros_like(x)
 
         # 전문가별로 토큰 모아 계산
         for e_id, expert in enumerate(self.experts):
-            # K 축에서 해당 전문가가 선택된 위치 마스크
+            # K 축 전문가가 선택된 위치 마스크
             sel_mask = (indices == e_id).any(dim=-1)
             if not sel_mask.any():
                 continue
@@ -72,6 +72,7 @@ class ChangeMoE:
         device:torch.device,
         **hf_kwargs,
     ):
+        self.model_id = model_id
         self.num_experts = num_experts
         self.top_k = top_k
         self.dtype = dtype
@@ -112,40 +113,30 @@ class ChangeMoE:
         return self.tokenizer
     
     def save_moe(self, save_dir: str):
-            """
-            Persist the *already-converted* MoE model.
-
-            • We store …
-                ─ the model’s state_dict  ➜   <save_dir>/pytorch_model.bin
-                ─ a small JSON with MoE meta ➜   <save_dir>/moe_meta.json
-                ─ the tokenizer files       ➜   usual HF format
-            """
             os.makedirs(save_dir, exist_ok=True)
 
-            torch.save(self.model.state_dict(), os.path.join(save_dir, "pytorch_model.bin"))
+            torch.save(self.model.state_dict(), os.path.join(save_dir, f"{self.model_id}_moe.pt"))
 
-            # -- 2) save MoE-specific hyper-parameters so we can rebuild the net
             moe_meta = {
                 "base_model_id": self.model.config._name_or_path,
                 "num_experts":   self.num_experts,
                 "top_k":         self.top_k,
                 "dtype":         str(self.dtype).replace("torch.", ""), # 안해주면 에러나서 추가함.
             }
-            with open(os.path.join(save_dir, "moe_meta.json"), "w") as fp:
+            with open(os.path.join(save_dir, f"{self.model_id}_moe_meta.json"), "w") as fp:
                 json.dump(moe_meta, fp, indent=2)
 
             self.tokenizer.save_pretrained(save_dir) # 굳이 필요할까?
 
     @classmethod
     def load_moe(cls,
-                 load_dir: str,
+                 load_dir_path: str,
                  device: str | torch.device = "CUDA",
                  strict: bool = True,
                  **hf_kwargs,
                  ) -> "ChangeMoE":
         # 아예 인스턴스를 새로 만들어서 리턴. 
-
-        meta_path = os.path.join(load_dir, "moe_meta.json")
+        meta_path = os.path.join(load_dir_path)
         if not os.path.isfile(meta_path):
             raise FileNotFoundError(f"'{meta_path}' MoEChanger meta 없음.")
         
@@ -162,18 +153,13 @@ class ChangeMoE:
                   device        = device,
                   **hf_kwargs)
 
-        ckpt_path = os.path.join(load_dir, "pytorch_model.bin")
+        ckpt_path = os.path.join(load_dir_path)
         state = torch.load(ckpt_path, map_location="cpu")
         obj.model.load_state_dict(state, strict=strict)
 
-        obj.tokenizer = AutoTokenizer.from_pretrained(load_dir, use_fast=False) # 필요한가?
-        obj.tokenizer.pad_token = obj.tokenizer.eos_token
-        obj.tokenizer.padding_side = "left"
 
-        # send to device if not already
         if device is not None:
             obj.model.to(device)
-
         return obj
     
 if __name__ == '__main__':
@@ -207,9 +193,9 @@ if __name__ == '__main__':
     #     )
     moe_model.train()
     gen_ids = moe_model.generate(
-        input_ids       = inputs["input_ids"],
-        attention_mask  = inputs["attention_mask"],
-        do_sample       = False # Greedy
+        input_ids = inputs["input_ids"],
+        attention_mask = inputs["attention_mask"],
+        do_sample = False # Greedy
     )
     decoded = tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
     for i, output in enumerate(decoded):
@@ -219,4 +205,3 @@ if __name__ == '__main__':
     changer.save_moe("./save_moe")
     new_changer = ChangeMoE.load_moe("./save_moe","CUDA")
     updated_lm = new_changer.get_model()
-    updated_tokenizer = new_changer.get_tokenizer() # 이거 사실 변경 없음.
