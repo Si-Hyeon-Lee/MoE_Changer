@@ -81,8 +81,8 @@ class ChangeMoE:
         self.tokenizer = AutoTokenizer.from_pretrained(model_id,use_fast=False)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            torch_dtype=dtype,
-            trust_remote_code=True, 
+            torch_dtype = dtype,
+            trust_remote_code = True, 
             **hf_kwargs,
         )
         print(f'{sys.getsizeof(self.model)}\n{self.model}')
@@ -97,11 +97,11 @@ class ChangeMoE:
             #print(layer)
             original_mlp = layer.mlp # < original mlp = LlamaMlp(안에 linear 3개, SiLU activa)
             layer.mlp = MoEFFN(
-                template_mlp=original_mlp,
-                dtype=self.dtype,
-                num_experts=self.num_experts,
-                top_k=self.top_k,
-                device=self.device
+                template_mlp = original_mlp,
+                dtype = self.dtype,
+                num_experts = self.num_experts,
+                top_k = self.top_k,
+                device = self.device
             )
             #print(layer.mlp)
             #print(f"Layer {i}: changed FFN to MoE")
@@ -119,14 +119,12 @@ class ChangeMoE:
 
             moe_meta = {
                 "base_model_id": self.model.config._name_or_path,
-                "num_experts":   self.num_experts,
-                "top_k":         self.top_k,
-                "dtype":         str(self.dtype).replace("torch.", ""), # 안해주면 에러나서 추가함.
+                "num_experts": self.num_experts,
+                "top_k": self.top_k,
+                "dtype": str(self.dtype).replace("torch.", ""), # 안해주면 에러나서 추가함.
             }
             with open(os.path.join(save_dir, f"{self.model_id}_moe_meta.json"), "w") as fp:
                 json.dump(moe_meta, fp, indent=2)
-
-            self.tokenizer.save_pretrained(save_dir) # 굳이 필요할까?
 
     @classmethod
     def load_moe(cls,
@@ -146,11 +144,11 @@ class ChangeMoE:
         dtype = getattr(torch, meta["dtype"])
         base_id = meta["base_model_id"]
 
-        obj = cls(model_id      = base_id,
-                  num_experts   = meta["num_experts"],
-                  top_k         = meta["top_k"],
-                  dtype         = dtype,
-                  device        = device,
+        obj = cls(model_id = base_id,
+                  num_experts = meta["num_experts"],
+                  top_k = meta["top_k"],
+                  dtype = dtype,
+                  device = device,
                   **hf_kwargs)
 
         ckpt_path = os.path.join(load_dir_path)
